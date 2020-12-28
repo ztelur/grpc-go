@@ -97,17 +97,26 @@ type serverWorkerData struct {
 }
 
 // Server is a gRPC server to serve RPC requests.
+// // Server结构体
+//// 一个Server结构代表对外服务的单元，每个Server可以注册
+//// 多个Service，每个Service可以有多个方法，主程序需要
+//// 实例化Server，注册Service，然后调用s.Serve(l)
 type Server struct {
 	opts serverOptions
 
-	mu       sync.Mutex // guards following
-	lis      map[net.Listener]bool
-	conns    map[transport.ServerTransport]bool
-	serve    bool
-	drain    bool
-	cv       *sync.Cond              // signaled when connections close for GracefulStop
+	mu sync.Mutex // guards following
+	// 监听地址列表
+	lis map[net.Listener]bool
+	// 客户端的连接
+	conns map[transport.ServerTransport]bool
+	serve bool
+	drain bool
+	// 优雅退出时，会等待在此信号，直到所有的RPC都处理完了，并且所有的传输层断开
+	cv *sync.Cond // signaled when connections close for GracefulStop
+	// 服务名: 服务
 	services map[string]*serviceInfo // service name -> service info
-	events   trace.EventLog
+	// 事件追踪
+	events trace.EventLog
 
 	quit               *grpcsync.Event
 	done               *grpcsync.Event
@@ -120,21 +129,32 @@ type Server struct {
 	serverWorkerChannels []chan *serverWorkerData
 }
 
+// Server配置项
+// Server可设置的选项
 type serverOptions struct {
-	creds                 credentials.TransportCredentials
-	codec                 baseCodec
-	cp                    Compressor
-	dc                    Decompressor
-	unaryInt              UnaryServerInterceptor
-	streamInt             StreamServerInterceptor
-	chainUnaryInts        []UnaryServerInterceptor
-	chainStreamInts       []StreamServerInterceptor
-	inTapHandle           tap.ServerInHandle
-	statsHandler          stats.Handler
+	// 加密信息， 目前实现了TLS
+	creds credentials.TransportCredentials
+	// 数据编解码，目前实现了protobuf，并用缓存池sync.Pool优化
+	codec baseCodec
+	// 数据压缩，目前实现了gzip
+	cp Compressor
+	// 数据解压，目前实现了gzip
+	dc Decompressor
+	// 单次请求的拦截器
+	unaryInt UnaryServerInterceptor
+	// 流式请求的拦截器
+	streamInt       StreamServerInterceptor
+	chainUnaryInts  []UnaryServerInterceptor
+	chainStreamInts []StreamServerInterceptor
+	inTapHandle     tap.ServerInHandle
+	// 统计
+	statsHandler stats.Handler
+	// 最大消息长度 最大并发流数量，http2协议规范
 	maxConcurrentStreams  uint32
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
 	unknownStreamDesc     *StreamDesc
+	// server端的keepalive参数，会由单独的gorotine负责探测客户端连接的活性
 	keepaliveParams       keepalive.ServerParameters
 	keepalivePolicy       keepalive.EnforcementPolicy
 	initialWindowSize     int32
@@ -503,12 +523,14 @@ func (s *Server) stopServerWorkers() {
 }
 
 // NewServer creates a gRPC server which has no service registered and has not
-// started to accept requests yet.
+// started to accept requests yet. 工厂方法
 func NewServer(opt ...ServerOption) *Server {
+	// 默认配置
 	opts := defaultServerOptions
 	for _, o := range opt {
 		o.apply(&opts)
 	}
+	// 实例化Server
 	s := &Server{
 		lis:      make(map[net.Listener]bool),
 		opts:     opts,
@@ -568,7 +590,10 @@ type ServiceRegistrar interface {
 // server. It is called from the IDL generated code. This must be called before
 // invoking Serve. If ss is non-nil (for legacy code), its type is checked to
 // ensure it implements sd.HandlerType.
+// 注册service: sd接口，ss实现
+// 如果使用protobuf的gRPC-Go插件，则会生成sd接口
 func (s *Server) RegisterService(sd *ServiceDesc, ss interface{}) {
+	// 检查ss是否实现sd定义的服务方法接口
 	if ss != nil {
 		ht := reflect.TypeOf(sd.HandlerType).Elem()
 		st := reflect.TypeOf(ss)
@@ -586,14 +611,19 @@ func (s *Server) register(sd *ServiceDesc, ss interface{}) {
 	if s.serve {
 		logger.Fatalf("grpc: Server.RegisterService after Server.Serve for %q", sd.ServiceName)
 	}
+	// 检查是否已注册
 	if _, ok := s.services[sd.ServiceName]; ok {
 		logger.Fatalf("grpc: Server.RegisterService found duplicate service registration for %q", sd.ServiceName)
 	}
+	// 实例化一个服务
 	info := &serviceInfo{
+		// 具体实现
 		serviceImpl: ss,
-		methods:     make(map[string]*MethodDesc),
-		streams:     make(map[string]*StreamDesc),
-		mdata:       sd.Metadata,
+		// 单次方法信息
+		methods: make(map[string]*MethodDesc),
+		// 流式方法信息
+		streams: make(map[string]*StreamDesc),
+		mdata:   sd.Metadata,
 	}
 	for i := range sd.Methods {
 		d := &sd.Methods[i]
@@ -603,6 +633,7 @@ func (s *Server) register(sd *ServiceDesc, ss interface{}) {
 		d := &sd.Streams[i]
 		info.streams[d.StreamName] = d
 	}
+	// 注册服务到server
 	s.services[sd.ServiceName] = info
 }
 
@@ -688,7 +719,7 @@ func (l *listenSocket) Close() error {
 // read gRPC requests and then call the registered handlers to reply to them.
 // Serve returns when lis.Accept fails with fatal errors.  lis will be closed when
 // this method returns.
-// Serve will return a non-nil error unless Stop or GracefulStop is called.
+// Serve will return a non-nil error unless Stop or GracefulStop is called. 监听并接收连接请求
 func (s *Server) Serve(lis net.Listener) error {
 	s.mu.Lock()
 	s.printf("serving")
@@ -727,18 +758,22 @@ func (s *Server) Serve(lis net.Listener) error {
 	}()
 
 	var tempDelay time.Duration // how long to sleep on accept failure
-
+	// 循环处理连接，每个连接使用一个goroutine处理
 	for {
 		rawConn, err := lis.Accept()
+		// accept如果失败，则下次accept之前睡眠一段时间
 		if err != nil {
 			if ne, ok := err.(interface {
 				Temporary() bool
 			}); ok && ne.Temporary() {
 				if tempDelay == 0 {
+					// 初始5ms
 					tempDelay = 5 * time.Millisecond
 				} else {
+					// 否则翻倍
 					tempDelay *= 2
 				}
+				// 不超过1s
 				if max := 1 * time.Second; tempDelay > max {
 					tempDelay = max
 				}
@@ -746,6 +781,7 @@ func (s *Server) Serve(lis net.Listener) error {
 				s.printf("Accept error: %v; retrying in %v", err, tempDelay)
 				s.mu.Unlock()
 				timer := time.NewTimer(tempDelay)
+				// 等待超时重试，或者context事件的发生
 				select {
 				case <-timer.C:
 				case <-s.quit.Done():
@@ -763,6 +799,7 @@ func (s *Server) Serve(lis net.Listener) error {
 			}
 			return err
 		}
+		// 重置延时
 		tempDelay = 0
 		// Start a new goroutine to deal with rawConn so we don't stall this Accept
 		// loop goroutine.
@@ -770,6 +807,7 @@ func (s *Server) Serve(lis net.Listener) error {
 		// Make sure we account for the goroutine so GracefulStop doesn't nil out
 		// s.conns before this conn can be added.
 		s.serveWG.Add(1)
+		// 每个新的tcp连接使用单独的goroutine处理
 		go func() {
 			s.handleRawConn(rawConn)
 			s.serveWG.Done()
@@ -778,13 +816,14 @@ func (s *Server) Serve(lis net.Listener) error {
 }
 
 // handleRawConn forks a goroutine to handle a just-accepted connection that
-// has not had any I/O performed on it yet.
+// has not had any I/O performed on it yet. 连接与请求处理
 func (s *Server) handleRawConn(rawConn net.Conn) {
 	if s.quit.HasFired() {
 		rawConn.Close()
 		return
 	}
 	rawConn.SetDeadline(time.Now().Add(s.opts.connectionTimeout))
+	// 是否加密
 	conn, authInfo, err := s.useTransportAuthenticator(rawConn)
 	if err != nil {
 		// ErrConnDispatched means that the connection was dispatched away from
@@ -807,10 +846,12 @@ func (s *Server) handleRawConn(rawConn net.Conn) {
 	}
 
 	rawConn.SetDeadline(time.Time{})
+	// 加入每个连接的ServerTransport
 	if !s.addConn(st) {
 		return
 	}
 	go func() {
+		// 开始处理连接Transport，处理新的帧数据和流的打开
 		s.serveStreams(st)
 		s.removeConn(st)
 	}()
@@ -834,6 +875,8 @@ func (s *Server) newHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) tr
 		MaxHeaderListSize:     s.opts.maxHeaderListSize,
 		HeaderTableSize:       s.opts.headerTableSize,
 	}
+	// // 返回实现了ServerTransport接口的http2server
+	//  // 接口规定了HandleStream, Write等方法
 	st, err := transport.NewServerTransport("http2", c, config)
 	if err != nil {
 		s.mu.Lock()
@@ -847,11 +890,19 @@ func (s *Server) newHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) tr
 	return st
 }
 
+// 处理流
 func (s *Server) serveStreams(st transport.ServerTransport) {
+	// 处理完移除
 	defer st.Close()
 	var wg sync.WaitGroup
 
 	var roundRobinCounter uint32
+	// ServerTransport定义的HandleStream, 传入handler和trace callback方法
+	// 这里ServerTransport的HandleStream实现会使用包装的http2.frame，循环不断读取帧
+	// 直到客户端的net.Conn返回错误或者关闭为止，handler只用来处理HEADER类型的帧(即新的http
+	// 请求，新的流的打开)，其他帧比如数据帧会分发到对应的stream, 这里的HEADER帧数据包含
+	// 了grpc定义的http请求头等信息。HandleStream会一直循环读取新到达的帧，知道出现错误
+	// 实在需要关闭客户端的连接，流读写相关的错误一般不会导致连接的关闭。
 	st.HandleStreams(func(stream *transport.Stream) {
 		wg.Add(1)
 		if s.opts.numServerWorkers > 0 {
@@ -861,6 +912,7 @@ func (s *Server) serveStreams(st transport.ServerTransport) {
 			default:
 				// If all stream workers are busy, fallback to the default code path.
 				go func() {
+					// 处理stream，只有HEADER类型的帧才调用这个处理请求头等信息
 					s.handleStream(st, stream, s.traceInfo(st, stream))
 					wg.Done()
 				}()
@@ -878,6 +930,7 @@ func (s *Server) serveStreams(st transport.ServerTransport) {
 		tr := trace.New("grpc.Recv."+methodFamily(method), method)
 		return trace.NewContext(ctx, tr)
 	})
+	// 等待HandleStream结束，除非客户端的连接由于错误发生需要关闭，一般不会到这
 	wg.Wait()
 }
 
@@ -1500,6 +1553,7 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 	return err
 }
 
+//新请求的处理细节(新流的打开和帧数据的处理)
 func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Stream, trInfo *traceInfo) {
 	sm := stream.Method()
 	if sm != "" && sm[0] == '/' {

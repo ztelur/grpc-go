@@ -133,6 +133,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 	if config.MaxHeaderListSize != nil {
 		maxHeaderListSize = *config.MaxHeaderListSize
 	}
+	// 封装帧的读取，底层使用的是http2.frame
 	framer := newFramer(conn, writeBufSize, readBufSize, maxHeaderListSize)
 	// Send initial settings as connection preface to client.
 	isettings := []http2.Setting{{
@@ -141,6 +142,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 	}}
 	// TODO(zhaoq): Have a better way to signal "no limit" because 0 is
 	// permitted in the HTTP2 spec.
+	// 流的最大数量
 	maxStreams := config.MaxStreams
 	if maxStreams == 0 {
 		maxStreams = math.MaxUint32
@@ -152,6 +154,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 	}
 	dynamicWindow := true
 	iwz := int32(initialWindowSize)
+
 	if config.InitialWindowSize >= defaultWindowSize {
 		iwz = config.InitialWindowSize
 		dynamicWindow = false
@@ -161,6 +164,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 		icwz = config.InitialConnWindowSize
 		dynamicWindow = false
 	}
+	// 流窗口大小，默认16K
 	if iwz != defaultWindowSize {
 		isettings = append(isettings, http2.Setting{
 			ID:  http2.SettingInitialWindowSize,
@@ -187,7 +191,9 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 			return nil, connectionErrorf(false, err, "transport: %v", err)
 		}
 	}
+	// tcp连接的KeepAlive相关参数
 	kp := config.KeepaliveParams
+	// 最大idle时间，超过此客户端连接将被关闭，默认无穷
 	if kp.MaxConnectionIdle == 0 {
 		kp.MaxConnectionIdle = defaultMaxConnectionIdle
 	}
@@ -210,6 +216,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 		kep.MinTime = defaultKeepalivePolicyMinTime
 	}
 	done := make(chan struct{})
+	// 构建httpServer
 	t := &http2Server{
 		ctx:               context.Background(),
 		done:              done,
@@ -451,14 +458,17 @@ func (t *http2Server) operateHeaders(frame *http2.MetaHeadersFrame, handle func(
 
 // HandleStreams receives incoming streams using the given handler. This is
 // typically run in a separate goroutine.
-// traceCtx attaches trace to ctx and returns the new context.
+// traceCtx attaches trace to ctx and returns the new context. 连接的处理细节(http2连接的建立)
 func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.Context, string) context.Context) {
 	defer close(t.readerDone)
+	// 一直循环读取并处理帧, 注意什么时候底层的tcp连接会关闭，通常大多数情况下不会导致连接的关闭
+	// 从这里开始就是处理流和数据帧的逻辑了，连接复用在这里真正被体现
 	for {
 		t.controlBuf.throttle()
 		frame, err := t.framer.fr.ReadFrame()
 		atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
 		if err != nil {
+			// StreamError，不退出，
 			if se, ok := err.(http2.StreamError); ok {
 				if logger.V(logLevel) {
 					logger.Warningf("transport: http2Server.HandleStreams encountered http2.StreamError: %v", se)
@@ -466,9 +476,11 @@ func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.
 				t.mu.Lock()
 				s := t.activeStreams[se.StreamID]
 				t.mu.Unlock()
+				// 关闭Stream
 				if s != nil {
 					t.closeStream(s, true, se.Code, false)
 				} else {
+					// 控制输出错误信息
 					t.controlBuf.put(&cleanupStream{
 						streamID: se.StreamID,
 						rst:      true,
@@ -478,6 +490,7 @@ func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.
 				}
 				continue
 			}
+			// io.EOF什么时候触发? 客户端关闭连接?
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				t.Close()
 				return
@@ -488,12 +501,18 @@ func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.
 			t.Close()
 			return
 		}
+		// HTTP2定义的帧类型
 		switch frame := frame.(type) {
+		// // HEADER frame用来打开一个stream，表示一个新请求的到来和一个新的流的建立，这里需要使用Server定义的处理逻辑
+		//    // 解析请求头，得到服务和方法的名称
 		case *http2.MetaHeadersFrame:
+			// 上层传递过来的handle处理stream
 			if t.operateHeaders(frame, handle, traceCtx) {
 				t.Close()
 				break
 			}
+			// DataFrame, RSTStream, WindowUpdateFrame都属于特定stream id的Stream
+			// 会被分派给对应的Stream
 		case *http2.DataFrame:
 			t.handleData(frame)
 		case *http2.RSTStreamFrame:
