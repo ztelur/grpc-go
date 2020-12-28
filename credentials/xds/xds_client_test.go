@@ -33,6 +33,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/tls/certprovider"
 	"google.golang.org/grpc/internal"
+	xdsinternal "google.golang.org/grpc/internal/credentials/xds"
 	"google.golang.org/grpc/internal/grpctest"
 	"google.golang.org/grpc/internal/testutils"
 	"google.golang.org/grpc/resolver"
@@ -40,9 +41,10 @@ import (
 )
 
 const (
-	defaultTestTimeout = 1 * time.Second
-	defaultTestCertSAN = "*.test.example.com"
-	authority          = "authority"
+	defaultTestTimeout      = 10 * time.Second
+	defaultTestShortTimeout = 10 * time.Millisecond
+	defaultTestCertSAN      = "*.test.example.com"
+	authority               = "authority"
 )
 
 type s struct {
@@ -133,17 +135,6 @@ func (ts *testServer) stop() {
 	ts.lis.Close()
 }
 
-// A handshake function which simulates a handshake timeout. Tests usually pass
-// `defaultTestTimeout` to the ClientHandshake() method. This function just
-// hangs around for twice that duration, thus making sure that the context
-// passes to the credentials code times out.
-func testServerTLSHandshakeTimeout(_ net.Conn) handshakeResult {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*defaultTestTimeout)
-	<-ctx.Done()
-	cancel()
-	return handshakeResult{err: ctx.Err()}
-}
-
 // A handshake function which simulates a successful handshake without client
 // authentication (server does not request for client certificate during the
 // handshake here).
@@ -227,8 +218,8 @@ func newTestContextWithHandshakeInfo(parent context.Context, root, identity cert
 	// Creating the HandshakeInfo and adding it to the attributes is very
 	// similar to what the CDS balancer would do when it intercepts calls to
 	// NewSubConn().
-	info := NewHandshakeInfo(root, identity, sans...)
-	addr := SetHandshakeInfo(resolver.Address{}, info)
+	info := xdsinternal.NewHandshakeInfo(root, identity, sans...)
+	addr := xdsinternal.SetHandshakeInfo(resolver.Address{}, info)
 
 	// Moving the attributes from the resolver.Address to the context passed to
 	// the handshaker is done in the transport layer. Since we directly call the
@@ -239,7 +230,7 @@ func newTestContextWithHandshakeInfo(parent context.Context, root, identity cert
 
 // compareAuthInfo compares the AuthInfo received on the client side after a
 // successful handshake with the authInfo available on the testServer.
-func compareAuthInfo(ts *testServer, ai credentials.AuthInfo) error {
+func compareAuthInfo(ctx context.Context, ts *testServer, ai credentials.AuthInfo) error {
 	if ai.AuthType() != "tls" {
 		return fmt.Errorf("ClientHandshake returned authType %q, want %q", ai.AuthType(), "tls")
 	}
@@ -251,8 +242,6 @@ func compareAuthInfo(ts *testServer, ai credentials.AuthInfo) error {
 
 	// Read the handshake result from the testServer which contains the TLS
 	// connection state and compare it with the one received on the client-side.
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
-	defer cancel()
 	val, err := ts.hsResult.Receive(ctx)
 	if err != nil {
 		return fmt.Errorf("testServer failed to return handshake result: %v", err)
@@ -341,7 +330,7 @@ func (s) TestClientCredsProviderFailure(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 			defer cancel()
 			ctx = newTestContextWithHandshakeInfo(ctx, test.rootProvider, test.identityProvider)
-			if _, _, err := creds.ClientHandshake(ctx, authority, nil); !strings.Contains(err.Error(), test.wantErr) {
+			if _, _, err := creds.ClientHandshake(ctx, authority, nil); err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("ClientHandshake() returned error: %q, wantErr: %q", err, test.wantErr)
 			}
 		})
@@ -410,10 +399,56 @@ func (s) TestClientCredsSuccess(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ClientHandshake() returned failed: %q", err)
 			}
-			if err := compareAuthInfo(ts, ai); err != nil {
+			if err := compareAuthInfo(ctx, ts, ai); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func (s) TestClientCredsHandshakeTimeout(t *testing.T) {
+	clientDone := make(chan struct{})
+	// A handshake function which simulates a handshake timeout from the
+	// server-side by simply blocking on the client-side handshake to timeout
+	// and not writing any handshake data.
+	hErr := errors.New("server handshake error")
+	ts := newTestServerWithHandshakeFunc(func(rawConn net.Conn) handshakeResult {
+		<-clientDone
+		return handshakeResult{err: hErr}
+	})
+	defer ts.stop()
+
+	opts := ClientOptions{FallbackCreds: makeFallbackClientCreds(t)}
+	creds, err := NewClientCredentials(opts)
+	if err != nil {
+		t.Fatalf("NewClientCredentials(%v) failed: %v", opts, err)
+	}
+
+	conn, err := net.Dial("tcp", ts.address)
+	if err != nil {
+		t.Fatalf("net.Dial(%s) failed: %v", ts.address, err)
+	}
+	defer conn.Close()
+
+	sCtx, sCancel := context.WithTimeout(context.Background(), defaultTestShortTimeout)
+	defer sCancel()
+	ctx := newTestContextWithHandshakeInfo(sCtx, makeRootProvider(t, "x509/server_ca_cert.pem"), nil, defaultTestCertSAN)
+	if _, _, err := creds.ClientHandshake(ctx, authority, conn); err == nil {
+		t.Fatal("ClientHandshake() succeeded when expected to timeout")
+	}
+	close(clientDone)
+
+	// Read the handshake result from the testServer and make sure the expected
+	// error is returned.
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
+	defer cancel()
+	val, err := ts.hsResult.Receive(ctx)
+	if err != nil {
+		t.Fatalf("testServer failed to return handshake result: %v", err)
+	}
+	hsr := val.(handshakeResult)
+	if hsr.err != hErr {
+		t.Fatalf("testServer handshake returned error: %v, want: %v", hsr.err, hErr)
 	}
 }
 
@@ -432,13 +467,6 @@ func (s) TestClientCredsHandshakeFailure(t *testing.T) {
 			rootProvider:  makeRootProvider(t, "x509/client_ca_cert.pem"),
 			san:           defaultTestCertSAN,
 			wantErr:       "x509: certificate signed by unknown authority",
-		},
-		{
-			desc:          "handshake times out",
-			handshakeFunc: testServerTLSHandshakeTimeout,
-			rootProvider:  makeRootProvider(t, "x509/server_ca_cert.pem"),
-			san:           defaultTestCertSAN,
-			wantErr:       "context deadline exceeded",
 		},
 		{
 			desc:          "SAN mismatch",
@@ -502,12 +530,12 @@ func (s) TestClientCredsProviderSwitch(t *testing.T) {
 	// Create a root provider which will fail the handshake because it does not
 	// use the correct trust roots.
 	root1 := makeRootProvider(t, "x509/client_ca_cert.pem")
-	handshakeInfo := NewHandshakeInfo(root1, nil, defaultTestCertSAN)
+	handshakeInfo := xdsinternal.NewHandshakeInfo(root1, nil, defaultTestCertSAN)
 
 	// We need to repeat most of what newTestContextWithHandshakeInfo() does
 	// here because we need access to the underlying HandshakeInfo so that we
 	// can update it before the next call to ClientHandshake().
-	addr := SetHandshakeInfo(resolver.Address{}, handshakeInfo)
+	addr := xdsinternal.SetHandshakeInfo(resolver.Address{}, handshakeInfo)
 	contextWithHandshakeInfo := internal.NewClientHandshakeInfoContext.(func(context.Context, credentials.ClientHandshakeInfo) context.Context)
 	ctx = contextWithHandshakeInfo(ctx, credentials.ClientHandshakeInfo{Attributes: addr.Attributes})
 	if _, _, err := creds.ClientHandshake(ctx, authority, conn); err == nil {
@@ -534,13 +562,13 @@ func (s) TestClientCredsProviderSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientHandshake() returned failed: %q", err)
 	}
-	if err := compareAuthInfo(ts, ai); err != nil {
+	if err := compareAuthInfo(ctx, ts, ai); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// TestClone verifies the Clone() method.
-func (s) TestClone(t *testing.T) {
+// TestClientClone verifies the Clone() method on client credentials.
+func (s) TestClientClone(t *testing.T) {
 	opts := ClientOptions{FallbackCreds: makeFallbackClientCreds(t)}
 	orig, err := NewClientCredentials(opts)
 	if err != nil {
@@ -549,7 +577,7 @@ func (s) TestClone(t *testing.T) {
 
 	// The credsImpl does not have any exported fields, and it does not make
 	// sense to use any cmp options to look deep into. So, all we make sure here
-	// is that the cloned object points to a different locaiton in memory.
+	// is that the cloned object points to a different location in memory.
 	if clone := orig.Clone(); clone == orig {
 		t.Fatal("return value from Clone() doesn't point to new credentials instance")
 	}

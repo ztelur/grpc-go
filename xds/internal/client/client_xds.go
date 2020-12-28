@@ -38,6 +38,7 @@ import (
 
 	"google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/xds/internal"
+	"google.golang.org/grpc/xds/internal/env"
 	"google.golang.org/grpc/xds/internal/version"
 )
 
@@ -133,19 +134,13 @@ func processServerSideListener(lis *v3listenerpb.Listener) (*ListenerUpdate, err
 		return nil, fmt.Errorf("xds: socket_address port does not match the one in name. Got %q, want %q", p, port)
 	}
 
-	// Make sure that the listener resource contains a single filter chain with
-	// the application_protocols field set to "managed-mtls", and the
-	// "transport_socket" field containing the appropriate security
-	// configuration.
+	// Make sure the listener resource contains a single filter chain. We do not
+	// support multiple filter chains and picking the best match from the list.
 	fcs := lis.GetFilterChains()
 	if n := len(fcs); n != 1 {
 		return nil, fmt.Errorf("xds: filter chains count in LDS response does not match expected. Got %d, want 1", n)
 	}
 	fc := fcs[0]
-	aps := fc.GetFilterChainMatch().GetApplicationProtocols()
-	if len(aps) != 1 || aps[0] != "managed-mtls" {
-		return nil, fmt.Errorf("xds: application_protocols in LDS response does not match expected. Got %v, want %q", aps, "managed-mtls")
-	}
 
 	// If the transport_socket field is not specified, it means that the control
 	// plane has not sent us any security config. This is fine and the server
@@ -172,6 +167,13 @@ func processServerSideListener(lis *v3listenerpb.Listener) (*ListenerUpdate, err
 	sc, err := securityConfigFromCommonTLSContext(downstreamCtx.GetCommonTlsContext())
 	if err != nil {
 		return nil, err
+	}
+	if sc.IdentityInstanceName == "" {
+		return nil, errors.New("security configuration on the server-side does not contain identity certificate provider instance name")
+	}
+	sc.RequireClientCert = downstreamCtx.GetRequireClientCertificate().GetValue()
+	if sc.RequireClientCert && sc.RootInstanceName == "" {
+		return nil, errors.New("security configuration on the server-side does not contain root certificate provider instance name, but require_client_cert field is set")
 	}
 	return &ListenerUpdate{SecurityCfg: sc}, nil
 }
@@ -320,7 +322,8 @@ func routesProtoToSlice(routes []*v3routepb.Route, logger *grpclog.PrefixLogger)
 		}
 
 		clusters := make(map[string]uint32)
-		switch a := r.GetRoute().GetClusterSpecifier().(type) {
+		action := r.GetRoute()
+		switch a := action.GetClusterSpecifier().(type) {
 		case *v3routepb.RouteAction_Cluster:
 			clusters[a.Cluster] = 1
 		case *v3routepb.RouteAction_WeightedClusters:
@@ -339,6 +342,13 @@ func routesProtoToSlice(routes []*v3routepb.Route, logger *grpclog.PrefixLogger)
 		}
 
 		route.Action = clusters
+		msd := action.GetMaxStreamDuration()
+		// Prefer grpc_timeout_header_max, if set.
+		if dur := msd.GetGrpcTimeoutHeaderMax(); dur != nil {
+			route.MaxStreamDuration = dur.AsDuration()
+		} else {
+			route.MaxStreamDuration = msd.GetMaxStreamDuration().AsDuration()
+		}
 		routesRet = append(routesRet, &route)
 	}
 	return routesRet, nil
@@ -394,6 +404,7 @@ func validateCluster(cluster *v3clusterpb.Cluster) (ClusterUpdate, error) {
 		ServiceName: cluster.GetEdsClusterConfig().GetServiceName(),
 		EnableLRS:   cluster.GetLrsServer().GetSelf() != nil,
 		SecurityCfg: sc,
+		MaxRequests: circuitBreakersFromCluster(cluster),
 	}, nil
 }
 
@@ -422,7 +433,14 @@ func securityConfigFromCluster(cluster *v3clusterpb.Cluster) (*SecurityConfig, e
 		return nil, errors.New("xds: UpstreamTlsContext in CDS response does not contain a CommonTlsContext")
 	}
 
-	return securityConfigFromCommonTLSContext(upstreamCtx.GetCommonTlsContext())
+	sc, err := securityConfigFromCommonTLSContext(upstreamCtx.GetCommonTlsContext())
+	if err != nil {
+		return nil, err
+	}
+	if sc.RootInstanceName == "" {
+		return nil, errors.New("security configuration on the client-side does not contain root certificate provider instance name")
+	}
+	return sc, nil
 }
 
 // common is expected to be not nil.
@@ -465,10 +483,33 @@ func securityConfigFromCommonTLSContext(common *v3tlspb.CommonTlsContext) (*Secu
 		pi := common.GetValidationContextCertificateProviderInstance()
 		sc.RootInstanceName = pi.GetInstanceName()
 		sc.RootCertName = pi.GetCertificateName()
+	case nil:
+		// It is valid for the validation context to be nil on the server side.
 	default:
 		return nil, fmt.Errorf("xds: validation context contains unexpected type: %T", t)
 	}
 	return sc, nil
+}
+
+// circuitBreakersFromCluster extracts the circuit breakers configuration from
+// the received cluster resource. Returns nil if no CircuitBreakers or no
+// Thresholds in CircuitBreakers.
+func circuitBreakersFromCluster(cluster *v3clusterpb.Cluster) *uint32 {
+	if !env.CircuitBreakingSupport {
+		return nil
+	}
+	for _, threshold := range cluster.GetCircuitBreakers().GetThresholds() {
+		if threshold.GetPriority() != v3corepb.RoutingPriority_DEFAULT {
+			continue
+		}
+		maxRequestsPb := threshold.GetMaxRequests()
+		if maxRequestsPb == nil {
+			return nil
+		}
+		maxRequests := maxRequestsPb.GetValue()
+		return &maxRequests
+	}
+	return nil
 }
 
 // UnmarshalEndpoints processes resources received in an EDS response,

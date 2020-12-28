@@ -149,6 +149,10 @@ type ListenerUpdate struct {
 	SecurityCfg *SecurityConfig
 }
 
+func (lu *ListenerUpdate) String() string {
+	return fmt.Sprintf("{RouteConfigName: %q, SecurityConfig: %+v", lu.RouteConfigName, lu.SecurityCfg)
+}
+
 // RouteConfigUpdate contains information received in an RDS response, which is
 // of interest to the registered RDS watcher.
 type RouteConfigUpdate struct {
@@ -175,7 +179,10 @@ type Route struct {
 	CaseInsensitive bool
 	Headers         []*HeaderMatcher
 	Fraction        *uint32
-	Action          map[string]uint32 // action is weighted clusters.
+
+	// If the matchers above indicate a match, the below configuration is used.
+	Action            map[string]uint32 // action is weighted clusters.
+	MaxStreamDuration time.Duration
 }
 
 // HeaderMatcher represents header matchers.
@@ -221,6 +228,10 @@ type SecurityConfig struct {
 	// this list, and the handshake succeeds only if a match is found. Used only
 	// on the client-side.
 	AcceptedSANs []string
+	// RequireClientCert indicates if the server handshake process expects the
+	// client to present a certificate. Set to true when performing mTLS. Used
+	// only on the server-side.
+	RequireClientCert bool
 }
 
 // ClusterUpdate contains information from a received CDS response, which is of
@@ -233,6 +244,8 @@ type ClusterUpdate struct {
 	EnableLRS bool
 	// SecurityCfg contains security configuration sent by the control plane.
 	SecurityCfg *SecurityConfig
+	// MaxRequests for circuit breaking, if any (otherwise nil).
+	MaxRequests *uint32
 }
 
 // OverloadDropConfig contains the config to drop overloads.

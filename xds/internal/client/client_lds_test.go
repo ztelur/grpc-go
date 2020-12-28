@@ -32,6 +32,7 @@ import (
 	v3tlspb "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/golang/protobuf/proto"
 	anypb "github.com/golang/protobuf/ptypes/any"
+	wrapperspb "github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/grpc/xds/internal/version"
@@ -453,40 +454,6 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 			wantErr: "filter chains count in LDS response does not match expected",
 		},
 		{
-			name: "unexpected application protocol value",
-			resources: []*anypb.Any{
-				{
-					TypeUrl: version.V3ListenerURL,
-					Value: func() []byte {
-						lis := &v3listenerpb.Listener{
-							Name: v3LDSTarget,
-							Address: &v3corepb.Address{
-								Address: &v3corepb.Address_SocketAddress{
-									SocketAddress: &v3corepb.SocketAddress{
-										Address: "0.0.0.0",
-										PortSpecifier: &v3corepb.SocketAddress_PortValue{
-											PortValue: 9999,
-										},
-									},
-								},
-							},
-							FilterChains: []*v3listenerpb.FilterChain{
-								{
-									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"h2"},
-									},
-								},
-							},
-						}
-						mLis, _ := proto.Marshal(lis)
-						return mLis
-					}(),
-				},
-			},
-			wantErr: "application_protocols in LDS response does not match expected",
-		},
-		{
 			name: "unexpected transport socket name",
 			resources: []*anypb.Any{
 				{
@@ -507,9 +474,6 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 							FilterChains: []*v3listenerpb.FilterChain{
 								{
 									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"managed-mtls"},
-									},
 									TransportSocket: &v3corepb.TransportSocket{
 										Name: "unsupported-transport-socket-name",
 									},
@@ -544,9 +508,6 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 							FilterChains: []*v3listenerpb.FilterChain{
 								{
 									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"managed-mtls"},
-									},
 									TransportSocket: &v3corepb.TransportSocket{
 										Name: "envoy.transport_sockets.tls",
 										ConfigType: &v3corepb.TransportSocket_TypedConfig{
@@ -586,9 +547,6 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 							FilterChains: []*v3listenerpb.FilterChain{
 								{
 									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"managed-mtls"},
-									},
 									TransportSocket: &v3corepb.TransportSocket{
 										Name: "envoy.transport_sockets.tls",
 										ConfigType: &v3corepb.TransportSocket_TypedConfig{
@@ -629,9 +587,6 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 							FilterChains: []*v3listenerpb.FilterChain{
 								{
 									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"managed-mtls"},
-									},
 									TransportSocket: &v3corepb.TransportSocket{
 										Name: "envoy.transport_sockets.tls",
 										ConfigType: &v3corepb.TransportSocket_TypedConfig{
@@ -676,9 +631,6 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 							FilterChains: []*v3listenerpb.FilterChain{
 								{
 									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"managed-mtls"},
-									},
 									TransportSocket: &v3corepb.TransportSocket{
 										Name: "envoy.transport_sockets.tls",
 										ConfigType: &v3corepb.TransportSocket_TypedConfig{
@@ -731,9 +683,6 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 							FilterChains: []*v3listenerpb.FilterChain{
 								{
 									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"managed-mtls"},
-									},
 								},
 							},
 						}
@@ -747,7 +696,7 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 			},
 		},
 		{
-			name: "happy case with no identity certs",
+			name: "no identity and root certificate providers",
 			resources: []*anypb.Any{
 				{
 					TypeUrl: version.V3ListenerURL,
@@ -767,9 +716,104 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 							FilterChains: []*v3listenerpb.FilterChain{
 								{
 									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"managed-mtls"},
+									TransportSocket: &v3corepb.TransportSocket{
+										Name: "envoy.transport_sockets.tls",
+										ConfigType: &v3corepb.TransportSocket_TypedConfig{
+											TypedConfig: &anypb.Any{
+												TypeUrl: version.V3DownstreamTLSContextURL,
+												Value: func() []byte {
+													tls := &v3tlspb.DownstreamTlsContext{
+														RequireClientCertificate: &wrapperspb.BoolValue{Value: true},
+														CommonTlsContext: &v3tlspb.CommonTlsContext{
+															TlsCertificateCertificateProviderInstance: &v3tlspb.CommonTlsContext_CertificateProviderInstance{
+																InstanceName:    "identityPluginInstance",
+																CertificateName: "identityCertName",
+															},
+														},
+													}
+													mtls, _ := proto.Marshal(tls)
+													return mtls
+												}(),
+											},
+										},
 									},
+								},
+							},
+						}
+						mLis, _ := proto.Marshal(lis)
+						return mLis
+					}(),
+				},
+			},
+			wantErr: "security configuration on the server-side does not contain root certificate provider instance name, but require_client_cert field is set",
+		},
+		{
+			name: "no identity certificate provider with require_client_cert",
+			resources: []*anypb.Any{
+				{
+					TypeUrl: version.V3ListenerURL,
+					Value: func() []byte {
+						lis := &v3listenerpb.Listener{
+							Name: v3LDSTarget,
+							Address: &v3corepb.Address{
+								Address: &v3corepb.Address_SocketAddress{
+									SocketAddress: &v3corepb.SocketAddress{
+										Address: "0.0.0.0",
+										PortSpecifier: &v3corepb.SocketAddress_PortValue{
+											PortValue: 9999,
+										},
+									},
+								},
+							},
+							FilterChains: []*v3listenerpb.FilterChain{
+								{
+									Name: "filter-chain-1",
+									TransportSocket: &v3corepb.TransportSocket{
+										Name: "envoy.transport_sockets.tls",
+										ConfigType: &v3corepb.TransportSocket_TypedConfig{
+											TypedConfig: &anypb.Any{
+												TypeUrl: version.V3DownstreamTLSContextURL,
+												Value: func() []byte {
+													tls := &v3tlspb.DownstreamTlsContext{
+														CommonTlsContext: &v3tlspb.CommonTlsContext{},
+													}
+													mtls, _ := proto.Marshal(tls)
+													return mtls
+												}(),
+											},
+										},
+									},
+								},
+							},
+						}
+						mLis, _ := proto.Marshal(lis)
+						return mLis
+					}(),
+				},
+			},
+			wantErr: "security configuration on the server-side does not contain identity certificate provider instance name",
+		},
+		{
+			name: "happy case with no validation context",
+			resources: []*anypb.Any{
+				{
+					TypeUrl: version.V3ListenerURL,
+					Value: func() []byte {
+						lis := &v3listenerpb.Listener{
+							Name: v3LDSTarget,
+							Address: &v3corepb.Address{
+								Address: &v3corepb.Address_SocketAddress{
+									SocketAddress: &v3corepb.SocketAddress{
+										Address: "0.0.0.0",
+										PortSpecifier: &v3corepb.SocketAddress_PortValue{
+											PortValue: 9999,
+										},
+									},
+								},
+							},
+							FilterChains: []*v3listenerpb.FilterChain{
+								{
+									Name: "filter-chain-1",
 									TransportSocket: &v3corepb.TransportSocket{
 										Name: "envoy.transport_sockets.tls",
 										ConfigType: &v3corepb.TransportSocket_TypedConfig{
@@ -778,11 +822,9 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 												Value: func() []byte {
 													tls := &v3tlspb.DownstreamTlsContext{
 														CommonTlsContext: &v3tlspb.CommonTlsContext{
-															ValidationContextType: &v3tlspb.CommonTlsContext_ValidationContextCertificateProviderInstance{
-																ValidationContextCertificateProviderInstance: &v3tlspb.CommonTlsContext_CertificateProviderInstance{
-																	InstanceName:    "rootPluginInstance",
-																	CertificateName: "rootCertName",
-																},
+															TlsCertificateCertificateProviderInstance: &v3tlspb.CommonTlsContext_CertificateProviderInstance{
+																InstanceName:    "identityPluginInstance",
+																CertificateName: "identityCertName",
 															},
 														},
 													}
@@ -803,8 +845,8 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 			wantUpdate: map[string]ListenerUpdate{
 				v3LDSTarget: {
 					SecurityCfg: &SecurityConfig{
-						RootInstanceName: "rootPluginInstance",
-						RootCertName:     "rootCertName",
+						IdentityInstanceName: "identityPluginInstance",
+						IdentityCertName:     "identityCertName",
 					},
 				},
 			},
@@ -830,9 +872,6 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 							FilterChains: []*v3listenerpb.FilterChain{
 								{
 									Name: "filter-chain-1",
-									FilterChainMatch: &v3listenerpb.FilterChainMatch{
-										ApplicationProtocols: []string{"managed-mtls"},
-									},
 									TransportSocket: &v3corepb.TransportSocket{
 										Name: "envoy.transport_sockets.tls",
 										ConfigType: &v3corepb.TransportSocket_TypedConfig{
@@ -840,6 +879,7 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 												TypeUrl: version.V3DownstreamTLSContextURL,
 												Value: func() []byte {
 													tls := &v3tlspb.DownstreamTlsContext{
+														RequireClientCertificate: &wrapperspb.BoolValue{Value: true},
 														CommonTlsContext: &v3tlspb.CommonTlsContext{
 															TlsCertificateCertificateProviderInstance: &v3tlspb.CommonTlsContext_CertificateProviderInstance{
 																InstanceName:    "identityPluginInstance",
@@ -874,6 +914,7 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 						RootCertName:         "rootCertName",
 						IdentityInstanceName: "identityPluginInstance",
 						IdentityCertName:     "identityCertName",
+						RequireClientCert:    true,
 					},
 				},
 			},
@@ -883,11 +924,11 @@ func (s) TestUnmarshalListener_ServerSide(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			gotUpdate, err := UnmarshalListener(test.resources, nil)
-			if err != nil && !strings.Contains(err.Error(), test.wantErr) {
-				t.Errorf("UnmarshalListener(%v) = %v wantErr: %q", test.resources, err, test.wantErr)
+			if (err != nil) != (test.wantErr != "") {
+				t.Fatalf("UnmarshalListener(%v) = %v wantErr: %q", test.resources, err, test.wantErr)
 			}
-			if test.wantErr != "" {
-				return
+			if err != nil && !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("UnmarshalListener(%v) = %v wantErr: %q", test.resources, err, test.wantErr)
 			}
 			if !cmp.Equal(gotUpdate, test.wantUpdate, cmpopts.EquateEmpty()) {
 				t.Errorf("UnmarshalListener(%v) = %v want %v", test.resources, gotUpdate, test.wantUpdate)

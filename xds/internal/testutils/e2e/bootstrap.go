@@ -46,6 +46,10 @@ type BootstrapOptions struct {
 	NodeID string
 	// ServerURI is the address of the management server.
 	ServerURI string
+	// ServerResourceNameID is the Listener resource name to fetch.
+	ServerResourceNameID string
+	// CertificateProviders is the certificate providers configuration.
+	CertificateProviders map[string]json.RawMessage
 }
 
 // SetupBootstrapFile creates a temporary file with bootstrap contents, based on
@@ -75,12 +79,14 @@ func SetupBootstrapFile(opts BootstrapOptions) (func(), error) {
 		Node: node{
 			ID: opts.NodeID,
 		},
+		CertificateProviders:     opts.CertificateProviders,
+		GRPCServerResourceNameID: opts.ServerResourceNameID,
 	}
 	switch opts.Version {
 	case TransportV2:
 		// TODO: Add any v2 specific fields.
 	case TransportV3:
-		cfg.ServerFeatures = append(cfg.ServerFeatures, "xds_v3")
+		cfg.XdsServers[0].ServerFeatures = append(cfg.XdsServers[0].ServerFeatures, "xds_v3")
 	default:
 		return nil, fmt.Errorf("unsupported xDS transport protocol version: %v", opts.Version)
 	}
@@ -102,15 +108,35 @@ func SetupBootstrapFile(opts BootstrapOptions) (func(), error) {
 	}, nil
 }
 
+// DefaultFileWatcherConfig is a helper function to create a default certificate
+// provider plugin configuration. The test is expected to have setup the files
+// appropriately before this configuration is used to instantiate providers.
+func DefaultFileWatcherConfig(certPath, keyPath, caPath string) map[string]json.RawMessage {
+	cfg := fmt.Sprintf(`{
+			"plugin_name": "file_watcher",
+			"config": {
+				"certificate_file": %q,
+				"private_key_file": %q,
+				"ca_certificate_file": %q,
+				"refresh_interval": "600s"
+			}
+		}`, certPath, keyPath, caPath)
+	return map[string]json.RawMessage{
+		"google_cloud_private_spiffe": json.RawMessage(cfg),
+	}
+}
+
 type bootstrapConfig struct {
-	XdsServers     []server `json:"xds_servers,omitempty"`
-	Node           node     `json:"node,omitempty"`
-	ServerFeatures []string `json:"server_features,omitempty"`
+	XdsServers               []server                   `json:"xds_servers,omitempty"`
+	Node                     node                       `json:"node,omitempty"`
+	CertificateProviders     map[string]json.RawMessage `json:"certificate_providers,omitempty"`
+	GRPCServerResourceNameID string                     `json:"grpc_server_resource_name_id,omitempty"`
 }
 
 type server struct {
-	ServerURI    string  `json:"server_uri,omitempty"`
-	ChannelCreds []creds `json:"channel_creds,omitempty"`
+	ServerURI      string   `json:"server_uri,omitempty"`
+	ChannelCreds   []creds  `json:"channel_creds,omitempty"`
+	ServerFeatures []string `json:"server_features,omitempty"`
 }
 
 type creds struct {
