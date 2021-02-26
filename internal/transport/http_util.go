@@ -577,7 +577,9 @@ type framer struct {
 	writer *bufWriter
 	fr     *http2.Framer
 }
-
+/**
+ 创建frame，分装对conn的读取和写入
+ */
 func newFramer(conn net.Conn, writeBufferSize, readBufferSize int, maxHeaderListSize uint32) *framer {
 	if writeBufferSize < 0 {
 		writeBufferSize = 0

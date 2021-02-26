@@ -136,6 +136,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 	// 封装帧的读取，底层使用的是http2.frame
 	framer := newFramer(conn, writeBufSize, readBufSize, maxHeaderListSize)
 	// Send initial settings as connection preface to client.
+	// 组装初始化的 setting frame
 	isettings := []http2.Setting{{
 		ID:  http2.SettingMaxFrameSize,
 		Val: http2MaxFrameLen,
@@ -182,10 +183,11 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 			Val: *config.HeaderTableSize,
 		})
 	}
+	// 通过h2.framer 发送 settings
 	if err := framer.fr.WriteSettings(isettings...); err != nil {
 		return nil, connectionErrorf(false, err, "transport: %v", err)
 	}
-	// Adjust the connection flow control window if needed.
+	// Adjust the connection flow control window if needed. 如果需要则修改流空windows
 	if delta := uint32(icwz - defaultWindowSize); delta > 0 {
 		if err := framer.fr.WriteWindowUpdate(0, delta); err != nil {
 			return nil, connectionErrorf(false, err, "transport: %v", err)
@@ -240,6 +242,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 		czData:            new(channelzData),
 		bufferPool:        newBufferPool(),
 	}
+	// 控制消息buffer
 	t.controlBuf = newControlBuffer(t.done)
 	if dynamicWindow {
 		t.bdpEst = &bdpEstimator{
@@ -260,7 +263,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 	}
 
 	t.connectionID = atomic.AddUint64(&serverConnectionCounter, 1)
-
+	// 将上述的 frame 都清空
 	t.framer.writer.Flush()
 
 	defer func() {
@@ -269,7 +272,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 		}
 	}()
 
-	// Check the validity of client preface.
+	// 2.1 Check the validity of client preface. ？？？？ preface 魔数 是 要读取client发来的setting之类的
 	preface := make([]byte, len(clientPreface))
 	if _, err := io.ReadFull(t.conn, preface); err != nil {
 		return nil, connectionErrorf(false, err, "transport: http2Server.HandleStreams failed to receive the preface from client: %v", err)
@@ -277,7 +280,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 	if !bytes.Equal(preface, clientPreface) {
 		return nil, connectionErrorf(false, nil, "transport: http2Server.HandleStreams received bogus greeting from client: %q", preface)
 	}
-
+	// 2.2 读取 client 的setting
 	frame, err := t.framer.fr.ReadFrame()
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		return nil, err
@@ -286,6 +289,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 		return nil, connectionErrorf(false, err, "transport: http2Server.HandleStreams failed to read initial settings frame: %v", err)
 	}
 	atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
+	// 转化类型
 	sf, ok := frame.(*http2.SettingsFrame)
 	if !ok {
 		return nil, connectionErrorf(false, nil, "transport: http2Server.HandleStreams saw invalid preface type %T from client", frame)
@@ -295,6 +299,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 	go func() {
 		t.loopy = newLoopyWriter(serverSide, t.framer, t.controlBuf, t.bdpEst)
 		t.loopy.ssGoAwayHandler = t.outgoingGoAwayHandler
+		//  启动 controlBuf的逻辑训话
 		if err := t.loopy.run(); err != nil {
 			if logger.V(logLevel) {
 				logger.Errorf("transport: loopyWriter.run returning. Err: %v", err)
@@ -675,13 +680,15 @@ func (t *http2Server) handleRSTStream(f *http2.RSTStreamFrame) {
 		onWrite:  func() {},
 	})
 }
-
+// 处理 settingsFrame 字段
 func (t *http2Server) handleSettings(f *http2.SettingsFrame) {
+	// 如果是ack则不处理
 	if f.IsAck() {
 		return
 	}
 	var ss []http2.Setting
 	var updateFuncs []func()
+	// for循环便利，然后特殊处理
 	f.ForeachSetting(func(s http2.Setting) error {
 		switch s.ID {
 		case http2.SettingMaxHeaderListSize:
@@ -694,6 +701,8 @@ func (t *http2Server) handleSettings(f *http2.SettingsFrame) {
 		}
 		return nil
 	})
+
+	// 加入到controlBuf的
 	t.controlBuf.executeAndPut(func(interface{}) bool {
 		for _, f := range updateFuncs {
 			f()
