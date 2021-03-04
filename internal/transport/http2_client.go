@@ -912,6 +912,8 @@ func (t *http2Client) Write(s *Stream, hdr []byte, data []byte, opts *Options) e
 	} else if s.getState() != streamActive {
 		return errStreamDone
 	}
+
+	// 构建dataFrame
 	df := &dataFrame{
 		streamID:  s.id,
 		endStream: opts.Last,
@@ -923,6 +925,7 @@ func (t *http2Client) Write(s *Stream, hdr []byte, data []byte, opts *Options) e
 			return err
 		}
 	}
+	// 交给controlBuf来发送
 	return t.controlBuf.put(df)
 }
 

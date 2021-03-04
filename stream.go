@@ -157,6 +157,7 @@ func NewClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 	return cc.NewStream(ctx, desc, method, opts...)
 }
 
+// 创建一个客户端stream
 func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, method string, opts ...CallOption) (_ ClientStream, err error) {
 	if channelz.IsOn() {
 		cc.incrCallsStarted()
@@ -219,6 +220,7 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 		return nil, err
 	}
 
+	// 构建header
 	callHdr := &transport.CallHdr{
 		Host:           cc.authority,
 		Method:         method,
@@ -273,7 +275,7 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 		}
 		sh.HandleRPC(ctx, begin)
 	}
-
+	// 构造 clientStream 结构体
 	cs := &clientStream{
 		callHdr:      callHdr,
 		ctx:          ctx,
@@ -735,6 +737,7 @@ func (cs *clientStream) SendMsg(m interface{}) (err error) {
 	if cs.sentLast {
 		return status.Errorf(codes.Internal, "SendMsg called after CloseSend")
 	}
+	// 如果是不是stream调用，则本次发送完，就关闭
 	if !cs.desc.ClientStreams {
 		cs.sentLast = true
 	}
@@ -750,6 +753,7 @@ func (cs *clientStream) SendMsg(m interface{}) (err error) {
 		return status.Errorf(codes.ResourceExhausted, "trying to send message larger than max (%d vs. %d)", len(payload), *cs.callInfo.maxSendMessageSize)
 	}
 	msgBytes := data // Store the pointer before setting to nil. For binary logging.
+	// 构建重试用于发送消息的函数
 	op := func(a *csAttempt) error {
 		err := a.sendMsg(m, hdr, payload, data)
 		// nil out the message and uncomp when replaying; they are only needed for
@@ -757,6 +761,7 @@ func (cs *clientStream) SendMsg(m interface{}) (err error) {
 		m, data = nil, nil
 		return err
 	}
+	// 使用重试来执行函数，并添加成功回调用。
 	err = cs.withRetry(op, func() { cs.bufferForRetryLocked(len(hdr)+len(payload), op) })
 	if cs.binlog != nil && err == nil {
 		cs.binlog.Log(&binarylog.ClientMessage{
@@ -776,6 +781,7 @@ func (cs *clientStream) RecvMsg(m interface{}) error {
 	if cs.binlog != nil {
 		recvInfo = &payloadInfo{}
 	}
+	// 重试的不断获取接收消息
 	err := cs.withRetry(func(a *csAttempt) error {
 		return a.recvMsg(m, recvInfo)
 	}, cs.commitAttemptLocked)
@@ -886,6 +892,7 @@ func (a *csAttempt) sendMsg(m interface{}, hdr, payld, data []byte) error {
 		}
 		a.mu.Unlock()
 	}
+	// 调用ClientTransport来发送消息，对于client来说就是http2Client
 	if err := a.t.Write(a.s, hdr, payld, &transport.Options{Last: !cs.desc.ClientStreams}); err != nil {
 		if !cs.desc.ClientStreams {
 			// For non-client-streaming RPCs, we return nil instead of EOF on error
@@ -926,6 +933,7 @@ func (a *csAttempt) recvMsg(m interface{}, payInfo *payloadInfo) (err error) {
 		// Only initialize this state once per stream.
 		a.decompSet = true
 	}
+	// 接收消息
 	err = recv(a.p, cs.codec, a.s, a.dc, m, *cs.callInfo.maxReceiveMessageSize, payInfo, a.decomp)
 	if err != nil {
 		if err == io.EOF {
