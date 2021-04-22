@@ -303,7 +303,7 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 		cs.finish(err)
 		return nil, err
 	}
-
+	// 多次尝试newStream
 	op := func(a *csAttempt) error { return a.newStream() }
 	if err := cs.withRetry(op, func() { cs.bufferForRetryLocked(0, op) }); err != nil {
 		cs.finish(err)
@@ -391,6 +391,7 @@ func (cs *clientStream) newAttemptLocked(sh stats.Handler, trInfo *traceInfo) (r
 func (a *csAttempt) newStream() error {
 	cs := a.cs
 	cs.callHdr.PreviousAttempts = cs.numRetries
+	// 调用transport层的newStream
 	s, err := a.t.NewStream(cs.ctx, cs.callHdr)
 	if err != nil {
 		if _, ok := err.(transport.PerformedIOError); ok {
@@ -401,6 +402,7 @@ func (a *csAttempt) newStream() error {
 		return toRPCErr(err)
 	}
 	cs.attempt.s = s
+	// 构造parseer
 	cs.attempt.p = &parser{r: s}
 	return nil
 }
@@ -791,6 +793,7 @@ func (cs *clientStream) RecvMsg(m interface{}) error {
 			Message:      recvInfo.uncompressedBytes,
 		})
 	}
+	// 需要关闭stream
 	if err != nil || !cs.desc.ServerStreams {
 		// err != nil or non-server-streaming indicates end of stream.
 		cs.finish(err)
@@ -935,6 +938,7 @@ func (a *csAttempt) recvMsg(m interface{}, payInfo *payloadInfo) (err error) {
 	}
 	// 接收消息
 	err = recv(a.p, cs.codec, a.s, a.dc, m, *cs.callInfo.maxReceiveMessageSize, payInfo, a.decomp)
+	// 检查错误
 	if err != nil {
 		if err == io.EOF {
 			if statusErr := a.s.Status().Err(); statusErr != nil {
@@ -969,7 +973,7 @@ func (a *csAttempt) recvMsg(m interface{}, payInfo *payloadInfo) (err error) {
 		// Subsequent messages should be received by subsequent RecvMsg calls.
 		return nil
 	}
-	// Special handling for non-server-stream rpcs.
+	// Special handling for non-server-stream rpcs. 客户端非stream时，期望能收到EOF或者erros，来判定已经到了结尾
 	// This recv expects EOF or errors, so we don't collect inPayload.
 	err = recv(a.p, cs.codec, a.s, a.dc, m, *cs.callInfo.maxReceiveMessageSize, nil, a.decomp)
 	if err == nil {

@@ -528,6 +528,7 @@ const (
 	compressionMade payloadFormat = 1 // compressed
 )
 
+// 从底层的 reader 中读取完整的 grpc 消息
 // parser reads complete gRPC messages from the underlying reader.
 type parser struct {
 	// r is the underlying reader.
@@ -554,11 +555,13 @@ type parser struct {
 // that the underlying io.Reader must not return an incompatible
 // error.
 func (p *parser) recvMsg(maxReceiveMessageSize int) (pf payloadFormat, msg []byte, err error) {
+	// 读取header信息
 	if _, err := p.r.Read(p.header[:]); err != nil {
 		return 0, nil, err
 	}
-
+	// 判断是否压缩
 	pf = payloadFormat(p.header[0])
+	// 读取byte长度
 	length := binary.BigEndian.Uint32(p.header[1:])
 
 	if length == 0 {
@@ -684,7 +687,9 @@ type payloadInfo struct {
 	uncompressedBytes []byte
 }
 
+// 接收并且解压缩
 func recvAndDecompress(p *parser, s *transport.Stream, dc Decompressor, maxReceiveMessageSize int, payInfo *payloadInfo, compressor encoding.Compressor) ([]byte, error) {
+	// 读取一个完整的grpc message
 	pf, d, err := p.recvMsg(maxReceiveMessageSize)
 	if err != nil {
 		return nil, err
@@ -692,13 +697,14 @@ func recvAndDecompress(p *parser, s *transport.Stream, dc Decompressor, maxRecei
 	if payInfo != nil {
 		payInfo.wireLength = len(d)
 	}
-
+	// 检查压缩相关配置
 	if st := checkRecvPayload(pf, s.RecvCompress(), compressor != nil || dc != nil); st != nil {
 		return nil, st.Err()
 	}
 
 	var size int
 	if pf == compressionMade {
+		// 解压缩
 		// To match legacy behavior, if the decompressor is set by WithDecompressor or RPCDecompressor,
 		// use this decompressor as the default.
 		if dc != nil {
@@ -753,10 +759,12 @@ func decompress(compressor encoding.Compressor, d []byte, maxReceiveMessageSize 
 // dc takes precedence over compressor.
 // TODO(dfawley): wrap the old compressor/decompressor using the new API?
 func recv(p *parser, c baseCodec, s *transport.Stream, dc Decompressor, m interface{}, maxReceiveMessageSize int, payInfo *payloadInfo, compressor encoding.Compressor) error {
+	// 读取消息byte[]
 	d, err := recvAndDecompress(p, s, dc, maxReceiveMessageSize, payInfo, compressor)
 	if err != nil {
 		return err
 	}
+	// 解码
 	if err := c.Unmarshal(d, m); err != nil {
 		return status.Errorf(codes.Internal, "grpc: failed to unmarshal the received message %v", err)
 	}

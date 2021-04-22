@@ -307,6 +307,7 @@ func (c *controlBuffer) throttle() {
 	}
 }
 
+// 将消息加入到队列中
 func (c *controlBuffer) put(it cbItem) error {
 	_, err := c.executeAndPut(nil, it)
 	return err
@@ -320,16 +321,20 @@ func (c *controlBuffer) executeAndPut(f func(it interface{}) bool, it cbItem) (b
 		return false, c.err
 	}
 	if f != nil {
+		// 执行函数，传入cbItem
 		if !f(it) { // f wasn't successful
 			c.mu.Unlock()
 			return false, nil
 		}
 	}
+	// 当前消费者是否在等待
 	if c.consumerWaiting {
 		wakeUp = true
 		c.consumerWaiting = false
 	}
+	// 加入队列
 	c.list.enqueue(it)
+	// 如果是这种特殊类型
 	if it.isTransportResponseFrame() {
 		c.transportResponseFrames++
 		if c.transportResponseFrames == maxQueuedTransportResponseFrames {
@@ -340,6 +345,7 @@ func (c *controlBuffer) executeAndPut(f func(it interface{}) bool, it cbItem) (b
 		}
 	}
 	c.mu.Unlock()
+	// 唤醒
 	if wakeUp {
 		select {
 		case c.ch <- struct{}{}:
